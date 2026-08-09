@@ -1,0 +1,60 @@
+uav_mapping:
+  ros__parameters:
+
+    # ==========================
+    # ROS topics
+    # ==========================
+
+    odom_topic: "/fmu/out/vehicle_odometry"
+
+    # 改成你现在RViz已经验证过的实际topic
+    cloud_topic: "/lidar_3d/points"
+
+
+    # ==========================
+    # Voxel Map
+    # ==========================
+
+    resolution: 0.20
+
+    map_min:
+      [-15.0, -15.0, -1.0]
+
+    map_max:
+      [15.0, 15.0, 8.0]
+
+
+    # 无人机安全半径
+    inflation_radius: 0.45
+
+
+    # ==========================
+    # LiDAR
+    # ==========================
+
+    min_range: 0.30
+    max_range: 20.0
+
+
+    # 1 = 所有点
+    # 2 = 每两个点取一个
+    point_stride: 1
+
+
+    # ==========================
+    # LiDAR -> Body FLU 外参
+    # ==========================
+
+    lidar_xyz:
+      [0.12, 0.0, 0.315]
+
+    # roll pitch yaw，单位rad
+    lidar_rpy:
+      [0.0, 0.0, 0.0]
+
+
+    # ==========================
+    # 发布频率
+    # ==========================
+
+    publish_rate: 2.0
