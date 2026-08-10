@@ -1,6 +1,19 @@
 uav_mapping:
   ros__parameters:
 
+    lidar_time_offset: 0.016
+
+    # Gazebo仿真统一使用sim time
+    use_sim_time: true
+
+    frame_id: "map"
+
+    # 保存最近3秒PX4位姿
+    pose_buffer_duration: 3.0
+
+    # 等待位姿对齐的LiDAR帧最多缓存10帧
+    max_cloud_queue_size: 10
+
     # ==========================
     # ROS topics
     # ==========================

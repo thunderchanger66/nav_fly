@@ -4,6 +4,7 @@ PX4_GZ_WORLD=uav_mapping make px4_sitl gz_x500_lidar_3d
 MicroXRCEAgent udp4 -p 8888
 # 启动桥接
 ros2 run ros_gz_bridge parameter_bridge '/lidar_3d/points@sensor_msgs/msg/PointCloud2[gz.msgs.PointCloudPacked'
+ros2 run ros_gz_bridge parameter_bridge '/clock@rosgraph_msgs/msg/Clock[gz.msgs.Clock'
 # 雷达话题
 /lidar_3d/points
 # 点云坐标系
