@@ -1,0 +1,16 @@
+# 起点，map/ENU坐标系
+geometry_msgs/Point start
+
+# 终点，map/ENU坐标系
+geometry_msgs/Point goal
+
+---
+
+# 是否成功
+bool success
+
+# 状态信息
+string message
+
+# A*粗路径
+nav_msgs/Path path

@@ -1,7 +1,7 @@
 uav_mapping:
   ros__parameters:
 
-    lidar_time_offset: 0.016
+    lidar_time_offset: 0.0
 
     # Gazebo仿真统一使用sim time
     use_sim_time: true

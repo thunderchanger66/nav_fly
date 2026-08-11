@@ -1,0 +1,19 @@
+astar_planner:
+  ros__parameters:
+
+    # 地图
+    map_topic: "/uav_mapping/voxel_map"
+
+    # A*路径
+    path_topic: "/astar/path"
+
+
+    # ========================
+    # UNKNOWN处理
+    # ========================
+
+    # 未知环境需要允许探索UNKNOWN
+    allow_unknown: true
+
+    # 进入UNKNOWN的代价倍率
+    unknown_cost: 2.5
