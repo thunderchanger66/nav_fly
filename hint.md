@@ -17,5 +17,7 @@ git submodule add https://github.com/xxxx/别人的仓库.git 本地文件夹名
 # 如何clone
 git clone --recursive 你的仓库地址
 
+# 建图启动
+ros2 launch uav_mapping mapping.launch.py
 # Astar规划服务
 ros2 service call /astar/plan astar_planner/srv/PlanPath "{start: {x: 0.0, y: 0.0, z: 2.5}, goal: {x: 12.0, y: 0.0, z: 2.5}}"

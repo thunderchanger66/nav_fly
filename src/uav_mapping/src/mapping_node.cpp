@@ -46,6 +46,35 @@ public:
         // 1. 参数
         // =====================================================
 
+        self_filter_enable_ =
+            declare_parameter<bool>(
+                "self_filter_enable",
+                true);
+        auto self_filter_min =
+            declare_parameter<std::vector<double>>(
+                "self_filter_min",
+                {-0.45, -0.45, -0.20});
+        auto self_filter_max =
+            declare_parameter<std::vector<double>>(
+                "self_filter_max",
+                {0.45, 0.45, 0.25});
+        if (self_filter_min.size() != 3 ||
+            self_filter_max.size() != 3)
+        {
+            throw std::runtime_error(
+                "self_filter_min/max 必须为3维");
+        }
+        self_filter_min_ =
+            Eigen::Vector3d(
+                self_filter_min[0],
+                self_filter_min[1],
+                self_filter_min[2]);
+        self_filter_max_ =
+            Eigen::Vector3d(
+                self_filter_max[0],
+                self_filter_max[1],
+                self_filter_max[2]);
+
         lidar_time_offset_ =
             declare_parameter<double>(
                 "lidar_time_offset",
@@ -794,6 +823,11 @@ private:
                 p_lidar +
                 t_body_lidar_;
 
+            // 无人机自身反射点不进入地图
+            if (isSelfPoint(p_body))
+            {
+                continue;
+            }
 
             // Body FLU -> Map ENU
             const Eigen::Vector3d p_map =
@@ -977,8 +1011,36 @@ private:
             cloud);
     }
 
+    // =========================================================
+    // 判断激光点是否打到了无人机自身
+    //
+    // 输入必须是 Body FLU 坐标系下的点
+    // =========================================================
+    bool isSelfPoint(
+        const Eigen::Vector3d &p_body) const
+    {
+        if (!self_filter_enable_)
+            return false;
+
+
+        return
+            p_body.x() >= self_filter_min_.x() &&
+            p_body.x() <= self_filter_max_.x() &&
+
+            p_body.y() >= self_filter_min_.y() &&
+            p_body.y() <= self_filter_max_.y() &&
+
+            p_body.z() >= self_filter_min_.z() &&
+            p_body.z() <= self_filter_max_.z();
+    }
 
 private:
+
+    bool self_filter_enable_{true};
+    Eigen::Vector3d self_filter_min_{
+        -0.45, -0.45, -0.20};
+    Eigen::Vector3d self_filter_max_{
+        0.45,  0.45,  0.25};
 
     double lidar_time_offset_{0.0};
 

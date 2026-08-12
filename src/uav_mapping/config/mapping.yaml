@@ -1,6 +1,16 @@
 uav_mapping:
   ros__parameters:
 
+    # ==========================
+    # 无人机自身点云过滤
+    # ==========================
+    self_filter_enable: true
+    # 相对于 base_link / Body FLU
+    self_filter_min:
+      [-0.35, -0.35, -0.35]
+    self_filter_max:
+      [ 0.35,  0.35,  0.35]
+
     lidar_time_offset: 0.0
 
     # Gazebo仿真统一使用sim time
