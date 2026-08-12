@@ -1,6 +1,8 @@
 astar_planner:
   ros__parameters:
 
+    use_sim_time: true
+
     # 地图
     map_topic: "/uav_mapping/voxel_map"
 
