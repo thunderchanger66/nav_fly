@@ -22,9 +22,10 @@ param show UXRCE_DDS_SYNCT
 param set UXRCE_DDS_SYNCT 0
 
 # 安装第三方库
+git submodule add https://github.com/osqp/osqp.git third_party/osqp
+git submodule add https://github.com/gbionics/osqp-eigen.git third_party/osqp-eigen
 cd third_party
 ## osqp
-git clone https://github.com/osqp/osqp.git
 cd osqp
 mkdir build
 cd build
@@ -34,7 +35,6 @@ cmake .. \
 cmake --build . -j$(nproc)
 cmake --install .
 ## osqp-eigen
-git clone https://github.com/gbionics/osqp-eigen.git
 cd osqp-eigen
 mkdir build
 cd build
@@ -47,11 +47,16 @@ cmake --install .
 
 # 编译时需加上这个
 export CMAKE_PREFIX_PATH=$HOME/study/nav_fly/third_party/install:$CMAKE_PREFIX_PATH
+colcon build --packages-up-to bringup --symlink-install
 
 # 总启动
 ./scripts/start_sim.sh
 ros2 launch bringup navigation.launch.py
+
+# 单独的启动
 # 建图启动
 ros2 launch uav_mapping mapping.launch.py
+# 轨迹优化启动
+ros2 launch trajectory_optimizer trajectory_optimizer.launch.py
 # Astar规划服务
 ros2 service call /astar/plan astar_planner/srv/PlanPath "{start: {x: 0.0, y: 0.0, z: 2.5}, goal: {x: 12.0, y: 0.0, z: 2.5}}"
