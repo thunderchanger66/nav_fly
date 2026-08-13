@@ -21,10 +21,36 @@ git clone --recursive 你的仓库地址
 param show UXRCE_DDS_SYNCT
 param set UXRCE_DDS_SYNCT 0
 
+# 安装第三方库
+cd third_party
+## osqp
+git clone https://github.com/osqp/osqp.git
+cd osqp
+mkdir build
+cd build
+cmake .. \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_INSTALL_PREFIX=$HOME/uav_navigation_ws/third_party/install
+cmake --build . -j$(nproc)
+cmake --install .
+## osqp-eigen
+git clone https://github.com/gbionics/osqp-eigen.git
+cd osqp-eigen
+mkdir build
+cd build
+cmake .. \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_INSTALL_PREFIX=$HOME/study/nav_fly/third_party/install \
+  -DCMAKE_PREFIX_PATH=$HOME/study/nav_fly/third_party/install
+cmake --build . -j$(nproc)
+cmake --install .
+
+# 编译时需加上这个
+export CMAKE_PREFIX_PATH=$HOME/study/nav_fly/third_party/install:$CMAKE_PREFIX_PATH
+
 # 总启动
 ./scripts/start_sim.sh
 ros2 launch bringup navigation.launch.py
-
 # 建图启动
 ros2 launch uav_mapping mapping.launch.py
 # Astar规划服务

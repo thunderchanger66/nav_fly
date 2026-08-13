@@ -1,0 +1,75 @@
+trajectory_optimizer:
+  ros__parameters:
+
+    use_sim_time: true
+
+
+    # =========================
+    # Input
+    # =========================
+
+    map_topic: "/uav_mapping/voxel_map"
+
+    path_topic: "/astar/path"
+
+
+    # =========================
+    # UNKNOWN
+    # =========================
+
+    # 和A*保持一致：
+    # 最终允许向未知空间规划
+    unknown_is_free: true
+
+    # 但是路径简化不要随意
+    # 直接穿未知区域
+    simplify_allow_unknown: false
+
+
+    # =========================
+    # Reference control points
+    # =========================
+
+    control_point_spacing: 0.8
+
+
+    # =========================
+    # Corridor
+    # =========================
+
+    corridor_max_radius: 0.8
+
+    corridor_margin: 0.02
+
+
+    # =========================
+    # QP weights
+    # =========================
+
+    weight_smooth: 20.0
+
+    weight_reference: 1.0
+
+
+    # =========================
+    # Dynamics
+    # =========================
+
+    initial_dt: 0.4
+
+    max_vel_axis: 2.0
+
+    max_acc_axis: 2.5
+
+
+    # QP不可行时自动放慢
+    time_scale_factor: 1.25
+
+    max_time_scaling_attempts: 5
+
+
+    # =========================
+    # Final safety check
+    # =========================
+
+    validation_dt: 0.05

@@ -4,3 +4,6 @@
 [submodule "third_party/osqp"]
 	path = third_party/osqp
 	url = https://github.com/osqp/osqp
+[submodule "third_party/osqp-eigen"]
+	path = third_party/osqp-eigen
+	url = https://github.com/gbionics/osqp-eigen

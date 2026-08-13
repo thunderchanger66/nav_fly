@@ -57,6 +57,17 @@ def generate_launch_description():
         )
     )
 
+    optimizer_launch = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(
+            os.path.join(
+                get_package_share_directory(
+                    "trajectory_optimizer"
+                ),
+                "launch",
+                "trajectory_optimizer.launch.py"
+            )
+        )
+    )
 
     # =========================================================
     # RViz
@@ -93,5 +104,6 @@ def generate_launch_description():
 
         mapping_launch,
         astar_launch,
+        optimizer_launch,
         rviz
     ])
