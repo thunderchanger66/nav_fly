@@ -17,6 +17,10 @@ git submodule add https://github.com/xxxx/别人的仓库.git 本地文件夹名
 # 如何clone
 git clone --recursive 你的仓库地址
 
+# PX4与uXRCE-DDS时间同步关闭
+param show UXRCE_DDS_SYNCT
+param set UXRCE_DDS_SYNCT 0
+
 # 总启动
 ./scripts/start_sim.sh
 ros2 launch bringup navigation.launch.py
