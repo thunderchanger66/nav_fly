@@ -30,14 +30,14 @@ trajectory_optimizer:
     # Reference control points
     # =========================
 
-    control_point_spacing: 0.8
+    control_point_spacing: 0.3
 
 
     # =========================
     # Corridor
     # =========================
 
-    corridor_max_radius: 0.8
+    corridor_max_radius: 1.0
 
     corridor_margin: 0.02
 
@@ -46,16 +46,16 @@ trajectory_optimizer:
     # QP weights
     # =========================
 
-    weight_smooth: 20.0
+    weight_smooth: 30.0
 
-    weight_reference: 1.0
+    weight_reference: 2.0
 
 
     # =========================
     # Dynamics
     # =========================
 
-    initial_dt: 0.4
+    initial_dt: 0.5
 
     max_vel_axis: 2.0
 
