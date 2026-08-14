@@ -43,8 +43,18 @@ struct OptimizerOptions
     double corridor_margin{0.02};
 
     // QP 权重
-    double weight_smooth{10.0};
-    double weight_reference{5.0};
+    //
+    // weight_smooth:
+    //   二阶差分代价，抑制控制点曲率/加速度变化
+    //
+    // weight_jerk:
+    //   三阶差分代价，抑制加速度突变，使轨迹进一步平顺
+    //
+    // weight_reference:
+    //   防止优化结果偏离 A* 参考路径过远
+    double weight_smooth{20.0};
+    double weight_jerk{5.0};
+    double weight_reference{2.0};
 
     // 初始 B 样条节点时间间隔
     double initial_dt{0.5};

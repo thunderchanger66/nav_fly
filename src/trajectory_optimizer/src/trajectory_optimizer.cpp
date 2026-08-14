@@ -708,11 +708,15 @@ bool TrajectoryOptimizer::solveQP(
     }
 
     // --------------------------------------------------------
-    // 2. Smooth cost
+    // 2. 二阶差分平滑代价
     //
-    // ws * ||Qi - 2Qi+1 + Qi+2||^2
+    // J_smooth =
+    // sum ||Qi - 2Qi+1 + Qi+2||^2
+    //
+    // 它主要抑制控制点的二阶变化，使轨迹曲率和加速度
+    // 不要变化得过于剧烈。
     // --------------------------------------------------------
-    const double coeff[3] =
+    const double smooth_coeff[3] =
         {
             1.0,
             -2.0,
@@ -749,8 +753,72 @@ bool TrajectoryOptimizer::solveQP(
                         2.0 *
                         options_.
                             weight_smooth *
-                        coeff[a] *
-                        coeff[b]);
+                        smooth_coeff[a] *
+                        smooth_coeff[b]);
+                }
+            }
+        }
+    }
+
+
+    // --------------------------------------------------------
+    // 3. Jerk 三阶差分代价
+    //
+    // 离散三阶差分：
+    //
+    // Di =
+    // -Qi + 3Qi+1 - 3Qi+2 + Qi+3
+    //
+    // J_jerk =
+    // sum ||Di||^2
+    //
+    // 对均匀 B 样条而言，三阶差分与轨迹 jerk 成正比。
+    // 这里采用离散形式作为几何平滑代价，不额外除以 dt^3，
+    // 这样 dt 的自动缩放主要负责动力学可行性，不会导致
+    // 每次时间缩放时平滑权重发生巨大变化。
+    //
+    // 仍然是变量 Q 的二次型，所以问题保持为凸 QP。
+    // --------------------------------------------------------
+    const double jerk_coeff[4] =
+        {
+            -1.0,
+             3.0,
+            -3.0,
+             1.0
+        };
+
+    for (int i = 0;
+         i + 3 < N;
+         ++i)
+    {
+        for (int d = 0; d < 3; ++d)
+        {
+            for (int a = 0;
+                 a < 4;
+                 ++a)
+            {
+                for (int b = a;
+                     b < 4;
+                     ++b)
+                {
+                    const int ia =
+                        varIndex(
+                            i + a,
+                            d);
+
+                    const int ib =
+                        varIndex(
+                            i + b,
+                            d);
+
+                    h_triplets.emplace_back(
+                        ia,
+                        ib,
+                        2.0 *
+                        options_.
+                            weight_jerk *
+                        jerk_coeff[a] *
+                        jerk_coeff[b]);
                 }
             }
         }
