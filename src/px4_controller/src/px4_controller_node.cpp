@@ -115,7 +115,7 @@ public:
         status_sub_ =
             create_subscription<
                 px4_msgs::msg::VehicleStatus>(
-                "/fmu/out/vehicle_status",
+                "/fmu/out/vehicle_status_v4",
                 rclcpp::SensorDataQoS(),
                 std::bind(
                     &Px4ControllerNode::statusCallback,
