@@ -1,0 +1,30 @@
+px4_controller:
+  ros__parameters:
+
+    use_sim_time: true
+
+    # =========================
+    # Input trajectory
+    # =========================
+    trajectory_topic: "/trajectory_optimizer/bspline"
+
+    # =========================
+    # Control
+    # =========================
+    control_rate: 50.0
+
+    # 进入 Offboard 前连续发送 heartbeat / 起点setpoint
+    prestream_duration: 1.0
+
+    # 等待 PX4 确认 armed + offboard 的超时
+    mode_timeout: 5.0
+
+    # 到达轨迹起点多近以后才正式开始计时执行
+    start_position_tolerance: 0.25
+
+    # 新轨迹起点与无人机当前水平位置允许的最大偏差
+    # z 不限制，因此初始可以从地面爬升到路径起点高度
+    max_start_xy_error: 1.0
+
+    # 轨迹完成后保持终点悬停
+    hold_end: true
