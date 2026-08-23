@@ -52,11 +52,14 @@ colcon build --packages-up-to bringup --symlink-install
 # 总启动
 ./scripts/start_sim.sh
 ros2 launch bringup navigation.launch.py
+ros2 launch px4_controller px4_controller.launch.py
 
 # 单独的启动
 # 建图启动
 ros2 launch uav_mapping mapping.launch.py
 # 轨迹优化启动
 ros2 launch trajectory_optimizer trajectory_optimizer.launch.py
+# PX4飞行启动
+ros2 launch px4_controller px4_controller.launch.py
 # Astar规划服务
 ros2 service call /astar/plan astar_planner/srv/PlanPath "{start: {x: 0.0, y: 0.0, z: 2.5}, goal: {x: 12.0, y: 0.0, z: 2.5}}"
