@@ -1,0 +1,43 @@
+<?xml version="1.0"?>
+
+<package format="3">
+
+  <name>planner_manager</name>
+
+  <version>0.0.1</version>
+
+  <description>
+    UAV navigation task manager with ROS 2 Action
+  </description>
+
+  <maintainer email="thunderchanger@outlook.com">
+    thunder
+  </maintainer>
+
+  <license>Apache-2.0</license>
+
+
+  <buildtool_depend>
+    ament_cmake
+  </buildtool_depend>
+
+
+  <depend>rclcpp</depend>
+  <depend>rclcpp_action</depend>
+
+  <depend>geometry_msgs</depend>
+
+  <depend>planner_manager_interfaces</depend>
+  <depend>astar_planner</depend>
+
+  <depend>px4_msgs</depend>
+  <depend>trajectory_optimizer</depend>
+
+
+  <export>
+    <build_type>
+      ament_cmake
+    </build_type>
+  </export>
+
+</package>

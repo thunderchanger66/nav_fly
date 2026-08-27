@@ -1,0 +1,47 @@
+planner_manager:
+  ros__parameters:
+
+    use_sim_time: true
+
+    # =========================
+    # Interfaces
+    # =========================
+    action_name: "/navigate_to_goal"
+
+    astar_service_name: "/astar/plan"
+
+    odom_topic: "/fmu/out/vehicle_odometry"
+
+    bspline_topic: "/trajectory_optimizer/bspline"
+
+    # =========================
+    # Goal judgement
+    # =========================
+    goal_tolerance: 0.30
+
+    # 连续处于目标半径内这么久才判定完成
+    goal_hold_time: 0.50
+
+    # =========================
+    # Initial takeoff planning
+    # =========================
+    # 如果当前z低于该值，认为无人机仍在地面附近
+    ground_z_threshold: 0.50
+
+    # 此时A*使用该高度作为规划起点
+    # px4_controller会先飞到B样条起点
+    takeoff_height: 2.50
+
+    # =========================
+    # Timeouts
+    # =========================
+    service_wait_timeout: 3.0
+
+    planning_timeout: 10.0
+
+    # A*成功以后等待新的 /trajectory_optimizer/bspline
+    optimizer_timeout: 5.0
+
+    execution_timeout: 120.0
+
+    feedback_rate: 10.0

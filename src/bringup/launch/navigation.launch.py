@@ -31,7 +31,6 @@ def generate_launch_description():
     # =========================================================
     # uav_mapping
     # =========================================================
-
     mapping_launch = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
             os.path.join(
@@ -46,7 +45,6 @@ def generate_launch_description():
     # =========================================================
     # astar_planner
     # =========================================================
-
     astar_launch = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
             os.path.join(
@@ -57,6 +55,10 @@ def generate_launch_description():
         )
     )
 
+
+    # =========================================================
+    # trajectory_optimizer
+    # =========================================================
     optimizer_launch = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
             os.path.join(
@@ -69,10 +71,42 @@ def generate_launch_description():
         )
     )
 
+
+    # =========================================================
+    # px4_controller
+    # =========================================================
+    controller_launch = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(
+            os.path.join(
+                get_package_share_directory(
+                    "px4_controller"
+                ),
+                "launch",
+                "px4_controller.launch.py"
+            )
+        )
+    )
+
+
+    # =========================================================
+    # planner_manager
+    # =========================================================
+    manager_launch = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(
+            os.path.join(
+                get_package_share_directory(
+                    "planner_manager"
+                ),
+                "launch",
+                "planner_manager.launch.py"
+            )
+        )
+    )
+
+
     # =========================================================
     # RViz
     # =========================================================
-
     rviz_config = os.path.join(
         get_package_share_directory(
             "bringup"
@@ -105,5 +139,8 @@ def generate_launch_description():
         mapping_launch,
         astar_launch,
         optimizer_launch,
+        controller_launch,
+        manager_launch,
+
         rviz
     ])
