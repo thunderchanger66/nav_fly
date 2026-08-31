@@ -4,7 +4,7 @@ planner_manager:
     use_sim_time: true
 
     # =========================
-    # Interfaces
+    # ROS interfaces
     # =========================
     action_name: "/navigate_to_goal"
 
@@ -12,34 +12,65 @@ planner_manager:
 
     odom_topic: "/fmu/out/vehicle_odometry"
 
+    map_topic: "/uav_mapping/voxel_map"
+
     bspline_topic: "/trajectory_optimizer/bspline"
+
 
     # =========================
     # Goal judgement
     # =========================
     goal_tolerance: 0.30
 
-    # 连续处于目标半径内这么久才判定完成
     goal_hold_time: 0.50
+
 
     # =========================
     # Initial takeoff planning
     # =========================
-    # 如果当前z低于该值，认为无人机仍在地面附近
     ground_z_threshold: 0.50
 
-    # 此时A*使用该高度作为规划起点
-    # px4_controller会先飞到B样条起点
     takeoff_height: 2.50
 
+
     # =========================
-    # Timeouts
+    # Online safety / Replan
+    # =========================
+
+    # 开启在线重规划
+    enable_replan: true
+
+    # 每秒检查几次未来B样条
+    safety_check_rate: 10.0
+
+    # 只检查当前飞机前方4m的轨迹
+    # 对当前最大速度约2m/s，相当于约2秒以上的安全提前量
+    lookahead_distance: 4.0
+
+    # B样条时间采样
+    trajectory_sample_dt: 0.05
+
+    # 当前A*允许UNKNOWN，因此这里也不把UNKNOWN直接当碰撞。
+    # 新障碍真正被LiDAR观测并进入OCCUPIED后才触发replan。
+    unknown_is_collision: false
+
+    # 飞出规划VoxelMap范围认为危险
+    outside_map_is_collision: true
+
+    # 防止地图连续更新导致反复规划
+    replan_cooldown: 1.0
+
+    # 单次Action任务最大重规划次数
+    max_replans: 10
+
+
+    # =========================
+    # Timeout
     # =========================
     service_wait_timeout: 3.0
 
     planning_timeout: 10.0
 
-    # A*成功以后等待新的 /trajectory_optimizer/bspline
     optimizer_timeout: 5.0
 
     execution_timeout: 120.0

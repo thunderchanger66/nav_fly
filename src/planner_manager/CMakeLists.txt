@@ -27,6 +27,7 @@ find_package(astar_planner REQUIRED)
 
 find_package(px4_msgs REQUIRED)
 find_package(trajectory_optimizer REQUIRED)
+find_package(uav_mapping REQUIRED)
 
 
 add_executable(
@@ -49,6 +50,7 @@ ament_target_dependencies(
 
   px4_msgs
   trajectory_optimizer
+  uav_mapping
 )
 
 

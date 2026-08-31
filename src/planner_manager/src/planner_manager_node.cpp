@@ -6,9 +6,9 @@
 
 #include <px4_msgs/msg/vehicle_odometry.hpp>
 #include <trajectory_optimizer/msg/b_spline_trajectory.hpp>
+#include <uav_mapping/msg/voxel_map.hpp>
 
 #include <geometry_msgs/msg/point.hpp>
-#include <geometry_msgs/msg/pose_stamped.hpp>
 
 #include <algorithm>
 #include <atomic>
@@ -17,12 +17,12 @@
 #include <condition_variable>
 #include <cstdint>
 #include <future>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <string>
 #include <thread>
-
-using namespace std::chrono_literals;
+#include <vector>
 
 
 class PlannerManagerNode : public rclcpp::Node
@@ -42,7 +42,7 @@ public:
         : Node("planner_manager")
     {
         // =====================================================
-        // 1. 参数
+        // 1. ROS接口参数
         // =====================================================
         action_name_ =
             declare_parameter<std::string>(
@@ -59,30 +59,34 @@ public:
                 "odom_topic",
                 "/fmu/out/vehicle_odometry");
 
+        map_topic_ =
+            declare_parameter<std::string>(
+                "map_topic",
+                "/uav_mapping/voxel_map");
+
         bspline_topic_ =
             declare_parameter<std::string>(
                 "bspline_topic",
                 "/trajectory_optimizer/bspline");
 
 
-        // 到达目标判定
+        // =====================================================
+        // 2. 到达目标判定
+        // =====================================================
         goal_tolerance_ =
             declare_parameter<double>(
                 "goal_tolerance",
                 0.30);
 
-        // 必须连续在目标范围内一段时间，
-        // 避免仅仅从目标附近快速经过就判定成功。
         goal_hold_time_ =
             declare_parameter<double>(
                 "goal_hold_time",
                 0.50);
 
 
-        // 初始在地面时，不直接以 z≈0 作为 A* 起点。
-        //
-        // 你的 px4_controller 本身会先飞到 B 样条起点，
-        // 因此这里把首次规划起点抬到 takeoff_height。
+        // =====================================================
+        // 3. 初始起飞规划
+        // =====================================================
         ground_z_threshold_ =
             declare_parameter<double>(
                 "ground_z_threshold",
@@ -94,7 +98,72 @@ public:
                 2.50);
 
 
-        // 超时参数
+        // =====================================================
+        // 4. 在线轨迹安全检测 / Replan参数
+        // =====================================================
+
+        // 是否启用在线碰撞检测
+        enable_replan_ =
+            declare_parameter<bool>(
+                "enable_replan",
+                true);
+
+        // 每秒检查几次当前B样条
+        safety_check_rate_ =
+            declare_parameter<double>(
+                "safety_check_rate",
+                10.0);
+
+        // 只检查飞机前方这么长的一段轨迹。
+        //
+        // 不需要每次检查整条轨迹：
+        // 真正需要马上处理的是“即将飞到”的部分。
+        lookahead_distance_ =
+            declare_parameter<double>(
+                "lookahead_distance",
+                4.0);
+
+        // B样条按时间采样的间隔
+        trajectory_sample_dt_ =
+            declare_parameter<double>(
+                "trajectory_sample_dt",
+                0.05);
+
+        // UNKNOWN 是否也认为危险。
+        //
+        // 对当前“未知静态环境探索式导航”：
+        // 建议 false。
+        //
+        // 因为A*本身允许在UNKNOWN中搜索；
+        // 真正发现障碍物并变成OCCUPIED后才触发重规划。
+        unknown_is_collision_ =
+            declare_parameter<bool>(
+                "unknown_is_collision",
+                false);
+
+        // 轨迹跑出VoxelMap边界必须认为不安全
+        outside_map_is_collision_ =
+            declare_parameter<bool>(
+                "outside_map_is_collision",
+                true);
+
+        // 两次重规划至少间隔这么久，
+        // 防止同一地图更新连续触发。
+        replan_cooldown_ =
+            declare_parameter<double>(
+                "replan_cooldown",
+                1.0);
+
+        // 单次任务最多允许多少次重规划
+        max_replans_ =
+            declare_parameter<int>(
+                "max_replans",
+                10);
+
+
+        // =====================================================
+        // 5. 超时参数
+        // =====================================================
         service_wait_timeout_ =
             declare_parameter<double>(
                 "service_wait_timeout",
@@ -122,7 +191,7 @@ public:
 
 
         // =====================================================
-        // 2. A* Service Client
+        // 6. A* Service Client
         // =====================================================
         astar_client_ =
             create_client<PlanPath>(
@@ -130,10 +199,7 @@ public:
 
 
         // =====================================================
-        // 3. PX4 Odometry
-        //
-        // PX4输出使用SensorDataQoS。
-        // 在这里转换 NED -> ENU/map。
+        // 7. PX4 Odometry
         // =====================================================
         odom_sub_ =
             create_subscription<
@@ -147,24 +213,32 @@ public:
 
 
         // =====================================================
-        // 4. 监听优化器输出的 B 样条
+        // 8. VoxelMap
         //
-        // 当前你的工程是：
+        // 使用与规划器相同的VoxelMap。
+        // 其中膨胀障碍应已经被标记为OCCUPIED。
+        // =====================================================
+        auto map_qos =
+            rclcpp::QoS(1)
+                .reliable()
+                .transient_local();
+
+        map_sub_ =
+            create_subscription<
+                uav_mapping::msg::VoxelMap>(
+                map_topic_,
+                map_qos,
+                std::bind(
+                    &PlannerManagerNode::mapCallback,
+                    this,
+                    std::placeholders::_1));
+
+
+        // =====================================================
+        // 9. B样条
         //
-        // A* service成功
-        //      ↓
-        // astar_node发布 /astar/path
-        //      ↓
-        // trajectory_optimizer自动优化
-        //      ↓
-        // 发布 /trajectory_optimizer/bspline
-        //      ↓
-        // px4_controller自动执行
-        //
-        // 所以 manager 不需要再修改现有 optimizer/controller。
-        //
-        // manager只需要确认：
-        // “本次规划以后，确实产生了一条新的B样条。”
+        // 一方面用于判断optimizer是否生成了新轨迹；
+        // 另一方面用于飞行中的在线碰撞检测。
         // =====================================================
         auto trajectory_qos =
             rclcpp::QoS(1)
@@ -183,7 +257,7 @@ public:
 
 
         // =====================================================
-        // 5. NavigateToGoal Action Server
+        // 10. NavigateToGoal Action Server
         // =====================================================
         action_server_ =
             rclcpp_action::create_server<NavigateToGoal>(
@@ -210,18 +284,10 @@ public:
 
         RCLCPP_INFO(
             get_logger(),
-            "Action: %s",
-            action_name_.c_str());
-
-        RCLCPP_INFO(
-            get_logger(),
-            "A* Service: %s",
-            astar_service_name_.c_str());
-
-        RCLCPP_INFO(
-            get_logger(),
-            "等待PX4里程计: %s",
-            odom_topic_.c_str());
+            "在线重规划: %s, lookahead=%.2f m, check_rate=%.1f Hz",
+            enable_replan_ ? "ON" : "OFF",
+            lookahead_distance_,
+            safety_check_rate_);
     }
 
 
@@ -248,10 +314,6 @@ private:
         std::lock_guard<std::mutex>
             lock(state_mutex_);
 
-        // ENU:
-        // x = East  = NED y
-        // y = North = NED x
-        // z = Up    = -NED z
         current_position_.x =
             msg->position[1];
 
@@ -261,12 +323,44 @@ private:
         current_position_.z =
             -msg->position[2];
 
-        odom_received_ = true;
+        odom_received_ =
+            true;
     }
 
 
     // =========================================================
-    // 收到一条新的优化B样条
+    // 更新地图
+    // =========================================================
+    void mapCallback(
+        const uav_mapping::msg::VoxelMap::SharedPtr msg)
+    {
+        const std::size_t expected =
+            static_cast<std::size_t>(msg->size_x) *
+            static_cast<std::size_t>(msg->size_y) *
+            static_cast<std::size_t>(msg->size_z);
+
+        if (msg->resolution <= 0.0 ||
+            msg->size_x == 0 ||
+            msg->size_y == 0 ||
+            msg->size_z == 0 ||
+            msg->data.size() != expected)
+        {
+            return;
+        }
+
+        std::lock_guard<std::mutex>
+            lock(map_mutex_);
+
+        latest_map_ =
+            *msg;
+
+        map_received_ =
+            true;
+    }
+
+
+    // =========================================================
+    // 收到新的B样条
     // =========================================================
     void bsplineCallback(
         const trajectory_optimizer::msg::
@@ -283,10 +377,13 @@ private:
             std::lock_guard<std::mutex>
                 lock(trajectory_mutex_);
 
-            ++trajectory_generation_;
+            latest_trajectory_ =
+                *msg;
 
-            latest_trajectory_duration_ =
-                msg->duration;
+            latest_trajectory_valid_ =
+                true;
+
+            ++trajectory_generation_;
         }
 
         trajectory_cv_.notify_all();
@@ -310,7 +407,7 @@ private:
         {
             RCLCPP_WARN(
                 get_logger(),
-                "拒绝Action目标：目标坐标非法");
+                "拒绝目标：坐标非法");
 
             return
                 rclcpp_action::GoalResponse::REJECT;
@@ -324,7 +421,7 @@ private:
         {
             RCLCPP_WARN(
                 get_logger(),
-                "拒绝Action目标：目前只支持map/ENU坐标系，收到frame=%s",
+                "拒绝目标：当前只支持map/ENU，收到frame=%s",
                 frame.c_str());
 
             return
@@ -339,7 +436,22 @@ private:
             {
                 RCLCPP_WARN(
                     get_logger(),
-                    "拒绝Action目标：尚未收到PX4 VehicleOdometry");
+                    "拒绝目标：尚未收到PX4里程计");
+
+                return
+                    rclcpp_action::GoalResponse::REJECT;
+            }
+        }
+
+        {
+            std::lock_guard<std::mutex>
+                lock(map_mutex_);
+
+            if (!map_received_)
+            {
+                RCLCPP_WARN(
+                    get_logger(),
+                    "拒绝目标：尚未收到VoxelMap");
 
                 return
                     rclcpp_action::GoalResponse::REJECT;
@@ -354,7 +466,7 @@ private:
         {
             RCLCPP_WARN(
                 get_logger(),
-                "拒绝Action目标：已有导航任务正在执行");
+                "拒绝目标：已有导航任务正在执行");
 
             return
                 rclcpp_action::GoalResponse::REJECT;
@@ -362,27 +474,22 @@ private:
 
         RCLCPP_INFO(
             get_logger(),
-            "接受导航目标: (%.2f, %.2f, %.2f)",
+            "接受目标: (%.2f, %.2f, %.2f)",
             p.x,
             p.y,
             p.z);
 
         return
-            rclcpp_action::GoalResponse::ACCEPT_AND_EXECUTE;
+            rclcpp_action::GoalResponse::
+                ACCEPT_AND_EXECUTE;
     }
 
 
     // =========================================================
     // Cancel
     //
-    // 第一版暂时拒绝cancel。
-    //
-    // 原因：
-    // 当前px4_controller收到B样条后会独立继续执行，
-    // manager自身停止Action并不能真正让飞机停止。
-    //
-    // 下一阶段加入“hold/cancel controller”接口后，
-    // 再把这里改成ACCEPT。
+    // 当前controller还没有独立的安全HOLD/STOP服务，
+    // 因此这里仍然拒绝Action cancel。
     // =========================================================
     rclcpp_action::CancelResponse handleCancel(
         const std::shared_ptr<
@@ -390,18 +497,13 @@ private:
     {
         RCLCPP_WARN(
             get_logger(),
-            "当前第一版暂不支持安全取消导航任务");
+            "当前版本暂不支持安全Cancel");
 
         return
             rclcpp_action::CancelResponse::REJECT;
     }
 
 
-    // =========================================================
-    // Goal accepted
-    //
-    // Action执行放到独立线程中，避免阻塞ROS回调。
-    // =========================================================
     void handleAccepted(
         const std::shared_ptr<
             GoalHandleNavigate> goal_handle)
@@ -422,12 +524,13 @@ private:
         std::lock_guard<std::mutex>
             lock(state_mutex_);
 
-        return current_position_;
+        return
+            current_position_;
     }
 
 
     // =========================================================
-    // 距离
+    // 欧式距离
     // =========================================================
     static double distance(
         const geometry_msgs::msg::Point &a,
@@ -442,15 +545,16 @@ private:
         const double dz =
             a.z - b.z;
 
-        return std::sqrt(
-            dx * dx +
-            dy * dy +
-            dz * dz);
+        return
+            std::sqrt(
+                dx * dx +
+                dy * dy +
+                dz * dz);
     }
 
 
     // =========================================================
-    // Feedback
+    // Action Feedback
     // =========================================================
     void publishFeedback(
         const std::shared_ptr<
@@ -495,10 +599,12 @@ private:
             state;
 
         feedback->distance_to_goal =
-            static_cast<float>(dist);
+            static_cast<float>(
+                dist);
 
         feedback->progress =
-            static_cast<float>(progress);
+            static_cast<float>(
+                progress);
 
         goal_handle->publish_feedback(
             feedback);
@@ -506,7 +612,7 @@ private:
 
 
     // =========================================================
-    // Abort helper
+    // Abort
     // =========================================================
     void abortGoal(
         const std::shared_ptr<
@@ -518,8 +624,11 @@ private:
             std::make_shared<
                 NavigateToGoal::Result>();
 
-        result->success = false;
-        result->message = message;
+        result->success =
+            false;
+
+        result->message =
+            message;
 
         result->total_time =
             static_cast<float>(
@@ -528,9 +637,11 @@ private:
                     now().seconds() -
                     start_time));
 
-        goal_handle->abort(result);
+        goal_handle->abort(
+            result);
 
-        goal_active_ = false;
+        goal_active_ =
+            false;
 
         RCLCPP_ERROR(
             get_logger(),
@@ -540,215 +651,136 @@ private:
 
 
     // =========================================================
-    // Action执行主过程
+    // 一次完整的：
+    //
+    // A* -> /astar/path -> Optimizer -> 新B样条
+    //
+    // 返回true表示新轨迹已经生成。
     // =========================================================
-    void execute(
+    bool planAndWaitTrajectory(
+        const geometry_msgs::msg::Point &start,
+        const geometry_msgs::msg::Point &goal,
         const std::shared_ptr<
-            GoalHandleNavigate> goal_handle)
+            GoalHandleNavigate> &goal_handle,
+        double initial_distance,
+        bool is_replan,
+        std::string &error_message)
     {
-        const double action_start_time =
-            now().seconds();
-
-        const auto goal =
-            goal_handle->get_goal();
-
-        geometry_msgs::msg::Point target;
-
-        target.x =
-            goal->goal_pose.pose.position.x;
-
-        target.y =
-            goal->goal_pose.pose.position.y;
-
-        target.z =
-            goal->goal_pose.pose.position.z;
-
-
-        // =====================================================
-        // 1. 当前实际位置
-        // =====================================================
-        const auto actual_start =
-            getCurrentPosition();
-
-        const double initial_distance =
-            distance(
-                actual_start,
-                target);
-
-
-        // 已经在目标附近
-        if (initial_distance <=
-            goal_tolerance_)
-        {
-            auto result =
-                std::make_shared<
-                    NavigateToGoal::Result>();
-
-            result->success = true;
-            result->message =
-                "已经位于目标附近";
-
-            result->total_time = 0.0f;
-
-            publishFeedback(
-                goal_handle,
-                "SUCCEEDED",
-                target,
-                initial_distance);
-
-            goal_handle->succeed(result);
-
-            goal_active_ = false;
-
-            return;
-        }
-
-
-        // =====================================================
-        // 2. 构造A*规划起点
-        //
-        // 无人机还在地面时：
-        //
-        // actual_start.z ≈ 0
-        //
-        // 如果直接从地面做3D A*，很容易与地面膨胀障碍冲突。
-        //
-        // 因此首次规划使用：
-        // (current_x, current_y, takeoff_height)
-        //
-        // px4_controller随后会自动先飞到这一B样条起点。
-        // =====================================================
-        geometry_msgs::msg::Point planning_start =
-            actual_start;
-
-        if (planning_start.z <
-            ground_z_threshold_)
-        {
-            planning_start.z =
-                takeoff_height_;
-
-            RCLCPP_INFO(
-                get_logger(),
-                "当前无人机位于地面附近，"
-                "A*起点高度由 %.2f m 调整为 %.2f m",
-                actual_start.z,
-                planning_start.z);
-        }
-
-
-        // =====================================================
-        // 3. 记录当前B样条版本号
-        //
-        // 后面必须等 generation 变大，
-        // 才能确认是本次A*触发的新轨迹，
-        // 而不是transient_local保存的旧轨迹。
-        // =====================================================
-        uint64_t trajectory_generation_before;
+        // -----------------------------------------------------
+        // 记录旧B样条版本号
+        // -----------------------------------------------------
+        uint64_t generation_before;
 
         {
             std::lock_guard<std::mutex>
                 lock(trajectory_mutex_);
 
-            trajectory_generation_before =
+            generation_before =
                 trajectory_generation_;
         }
 
 
-        // =====================================================
-        // 4. PLANNING：调用现有 /astar/plan
-        // =====================================================
-        publishFeedback(
-            goal_handle,
-            "PLANNING",
-            target,
-            initial_distance);
-
+        // -----------------------------------------------------
+        // 等A* Service
+        // -----------------------------------------------------
         if (!astar_client_->wait_for_service(
                 std::chrono::duration<double>(
                     service_wait_timeout_)))
         {
-            abortGoal(
-                goal_handle,
-                "等待 /astar/plan Service 超时",
-                action_start_time);
+            error_message =
+                "等待 /astar/plan Service 超时";
 
-            return;
+            return false;
         }
+
+
+        publishFeedback(
+            goal_handle,
+            is_replan ?
+                "REPLANNING" :
+                "PLANNING",
+            goal,
+            initial_distance);
+
 
         auto request =
             std::make_shared<
                 PlanPath::Request>();
 
         request->start =
-            planning_start;
+            start;
 
         request->goal =
-            target;
+            goal;
+
 
         RCLCPP_INFO(
             get_logger(),
-            "调用A*: start=(%.2f %.2f %.2f), goal=(%.2f %.2f %.2f)",
-            planning_start.x,
-            planning_start.y,
-            planning_start.z,
-            target.x,
-            target.y,
-            target.z);
+            "%sA*: start=(%.2f %.2f %.2f), goal=(%.2f %.2f %.2f)",
+            is_replan ? "重新" : "",
+            start.x,
+            start.y,
+            start.z,
+            goal.x,
+            goal.y,
+            goal.z);
+
 
         auto future =
-            astar_client_->
-                async_send_request(
-                    request);
+            astar_client_->async_send_request(
+                request);
+
 
         if (future.wait_for(
                 std::chrono::duration<double>(
                     planning_timeout_)) !=
             std::future_status::ready)
         {
-            abortGoal(
-                goal_handle,
-                "A*规划超时",
-                action_start_time);
+            error_message =
+                is_replan ?
+                "重新A*规划超时" :
+                "A*规划超时";
 
-            return;
+            return false;
         }
+
 
         const auto response =
             future.get();
 
+
         if (!response->success)
         {
-            abortGoal(
-                goal_handle,
-                "A*失败: " +
-                    response->message,
-                action_start_time);
+            error_message =
+                std::string(
+                    is_replan ?
+                    "重新A*失败: " :
+                    "A*失败: ") +
+                response->message;
 
-            return;
+            return false;
         }
+
 
         RCLCPP_INFO(
             get_logger(),
-            "A*成功，路径点数=%zu",
+            "%sA*成功，路径点=%zu",
+            is_replan ? "重新" : "",
             response->path.poses.size());
 
 
-        // =====================================================
-        // 5. OPTIMIZING
-        //
-        // 注意：
-        // 你的astar_node在Service成功时已经会发布 /astar/path。
-        //
-        // 所以这里“不需要重新publish Path”。
-        //
-        // trajectory_optimizer会自动收到 /astar/path，
-        // 完成QP并发布新的 /trajectory_optimizer/bspline。
-        // =====================================================
+        // -----------------------------------------------------
+        // astar_node成功后会发布 /astar/path，
+        // trajectory_optimizer会自动开始优化。
+        // -----------------------------------------------------
         publishFeedback(
             goal_handle,
-            "OPTIMIZING",
-            target,
+            is_replan ?
+                "REOPTIMIZING" :
+                "OPTIMIZING",
+            goal,
             initial_distance);
+
 
         {
             std::unique_lock<std::mutex>
@@ -763,45 +795,707 @@ private:
                     {
                         return
                             trajectory_generation_ >
-                            trajectory_generation_before;
+                            generation_before;
                     });
 
             if (!got_new_trajectory)
             {
-                lock.unlock();
+                error_message =
+                    is_replan ?
+                    "重新规划A*成功，但没有收到新的B样条" :
+                    "A*成功，但没有收到新的B样条";
 
-                abortGoal(
-                    goal_handle,
-                    "轨迹优化超时："
-                    "A*已成功，但没有收到新的B样条",
-                    action_start_time);
-
-                return;
+                return false;
             }
         }
 
+
         RCLCPP_INFO(
             get_logger(),
-            "收到本次规划对应的新B样条，"
-            "px4_controller将自动开始执行");
+            "%s轨迹生成成功",
+            is_replan ?
+                "重新规划" :
+                "初始规划");
+
+
+        return true;
+    }
+
+
+    // =========================================================
+    // 三次均匀B样条位置求值
+    //
+    // 这里只需要位置，不需要v/a/jerk。
+    // =========================================================
+    static geometry_msgs::msg::Point evaluateBSpline(
+        const trajectory_optimizer::msg::
+            BSplineTrajectory &trajectory,
+        double t)
+    {
+        geometry_msgs::msg::Point result;
+
+        const int N =
+            static_cast<int>(
+                trajectory.control_points.size());
+
+        if (N < 4 ||
+            trajectory.dt <= 0.0)
+        {
+            return result;
+        }
+
+        const int segment_num =
+            N - 3;
+
+        const double duration =
+            segment_num *
+            trajectory.dt;
+
+        t =
+            std::clamp(
+                t,
+                0.0,
+                duration);
+
+        int segment =
+            static_cast<int>(
+                std::floor(
+                    t /
+                    trajectory.dt));
+
+        double u = 0.0;
+
+        if (segment >= segment_num)
+        {
+            segment =
+                segment_num - 1;
+
+            u =
+                1.0;
+        }
+        else
+        {
+            u =
+                (
+                    t -
+                    segment *
+                    trajectory.dt
+                ) /
+                trajectory.dt;
+        }
+
+        const double u2 =
+            u * u;
+
+        const double u3 =
+            u2 * u;
+
+        const double B0 =
+            (
+                1.0 -
+                3.0 * u +
+                3.0 * u2 -
+                u3
+            ) /
+            6.0;
+
+        const double B1 =
+            (
+                4.0 -
+                6.0 * u2 +
+                3.0 * u3
+            ) /
+            6.0;
+
+        const double B2 =
+            (
+                1.0 +
+                3.0 * u +
+                3.0 * u2 -
+                3.0 * u3
+            ) /
+            6.0;
+
+        const double B3 =
+            u3 /
+            6.0;
+
+
+        const auto &Q0 =
+            trajectory.control_points[
+                segment];
+
+        const auto &Q1 =
+            trajectory.control_points[
+                segment + 1];
+
+        const auto &Q2 =
+            trajectory.control_points[
+                segment + 2];
+
+        const auto &Q3 =
+            trajectory.control_points[
+                segment + 3];
+
+
+        result.x =
+            B0 * Q0.x +
+            B1 * Q1.x +
+            B2 * Q2.x +
+            B3 * Q3.x;
+
+        result.y =
+            B0 * Q0.y +
+            B1 * Q1.y +
+            B2 * Q2.y +
+            B3 * Q3.y;
+
+        result.z =
+            B0 * Q0.z +
+            B1 * Q1.z +
+            B2 * Q2.z +
+            B3 * Q3.z;
+
+        return result;
+    }
+
+
+    // =========================================================
+    // 世界坐标 -> voxel index
+    // =========================================================
+    static bool worldToGrid(
+        const uav_mapping::msg::VoxelMap &map,
+        const geometry_msgs::msg::Point &p,
+        int &x,
+        int &y,
+        int &z)
+    {
+        x =
+            static_cast<int>(
+                std::floor(
+                    (
+                        p.x -
+                        map.origin.x
+                    ) /
+                    map.resolution));
+
+        y =
+            static_cast<int>(
+                std::floor(
+                    (
+                        p.y -
+                        map.origin.y
+                    ) /
+                    map.resolution));
+
+        z =
+            static_cast<int>(
+                std::floor(
+                    (
+                        p.z -
+                        map.origin.z
+                    ) /
+                    map.resolution));
+
+
+        return
+            x >= 0 &&
+            x <
+                static_cast<int>(
+                    map.size_x) &&
+
+            y >= 0 &&
+            y <
+                static_cast<int>(
+                    map.size_y) &&
+
+            z >= 0 &&
+            z <
+                static_cast<int>(
+                    map.size_z);
+    }
+
+
+    // =========================================================
+    // 一个点在最新VoxelMap里是否碰撞
+    // =========================================================
+    bool pointCollision(
+        const uav_mapping::msg::VoxelMap &map,
+        const geometry_msgs::msg::Point &p) const
+    {
+        int x;
+        int y;
+        int z;
+
+        if (!worldToGrid(
+                map,
+                p,
+                x,
+                y,
+                z))
+        {
+            return
+                outside_map_is_collision_;
+        }
+
+
+        const int index =
+            x +
+            static_cast<int>(map.size_x) *
+            (
+                y +
+                static_cast<int>(map.size_y) *
+                z
+            );
+
+
+        if (index < 0 ||
+            index >=
+                static_cast<int>(
+                    map.data.size()))
+        {
+            return
+                outside_map_is_collision_;
+        }
+
+
+        const int8_t state =
+            map.data[index];
+
+
+        // OCCUPIED / inflated obstacle
+        if (state >= 100)
+        {
+            return true;
+        }
+
+
+        // UNKNOWN
+        if (state < 0)
+        {
+            return
+                unknown_is_collision_;
+        }
+
+
+        return false;
+    }
+
+
+    // =========================================================
+    // 两个轨迹采样点之间继续做空间采样。
+    //
+    // 这样即使B样条时间采样刚好跨过一个障碍体素，
+    // 也不会漏检。
+    // =========================================================
+    bool segmentCollision(
+        const uav_mapping::msg::VoxelMap &map,
+        const geometry_msgs::msg::Point &a,
+        const geometry_msgs::msg::Point &b,
+        geometry_msgs::msg::Point &collision_point) const
+    {
+        const double length =
+            distance(
+                a,
+                b);
+
+        if (length < 1e-8)
+        {
+            if (pointCollision(
+                    map,
+                    a))
+            {
+                collision_point =
+                    a;
+
+                return true;
+            }
+
+            return false;
+        }
+
+
+        // 保证空间检测步长不超过半个voxel。
+        const double step =
+            std::max(
+                0.02,
+                std::min(
+                    0.10,
+                    0.5 *
+                    static_cast<double>(
+                        map.resolution)));
+
+
+        const int sample_num =
+            std::max(
+                1,
+                static_cast<int>(
+                    std::ceil(
+                        length /
+                        step)));
+
+
+        for (int i = 0;
+             i <= sample_num;
+             ++i)
+        {
+            const double alpha =
+                static_cast<double>(i) /
+                static_cast<double>(
+                    sample_num);
+
+            geometry_msgs::msg::Point p;
+
+            p.x =
+                a.x +
+                alpha *
+                (b.x - a.x);
+
+            p.y =
+                a.y +
+                alpha *
+                (b.y - a.y);
+
+            p.z =
+                a.z +
+                alpha *
+                (b.z - a.z);
+
+
+            if (pointCollision(
+                    map,
+                    p))
+            {
+                collision_point =
+                    p;
+
+                return true;
+            }
+        }
+
+
+        return false;
+    }
+
+
+    // =========================================================
+    // 检查“从无人机当前位置开始，前方lookahead_distance”
+    // 的B样条是否已经被最新地图中的障碍物挡住。
+    //
+    // 核心：
+    //
+    // 1. 对完整B样条采样；
+    // 2. 找到离当前无人机最近的轨迹采样点；
+    // 3. 只从这个点向前检查；
+    // 4. 最多检查lookahead_distance。
+    //
+    // 因此不会因为轨迹后方已经经过的障碍而重规划。
+    // =========================================================
+    bool trajectoryCollisionAhead(
+        const geometry_msgs::msg::Point &current,
+        geometry_msgs::msg::Point &collision_point)
+    {
+        uav_mapping::msg::VoxelMap map;
+
+        trajectory_optimizer::msg::
+            BSplineTrajectory trajectory;
+
+
+        {
+            std::lock_guard<std::mutex>
+                lock(map_mutex_);
+
+            if (!map_received_)
+            {
+                return false;
+            }
+
+            map =
+                latest_map_;
+        }
+
+
+        {
+            std::lock_guard<std::mutex>
+                lock(trajectory_mutex_);
+
+            if (!latest_trajectory_valid_)
+            {
+                return false;
+            }
+
+            trajectory =
+                latest_trajectory_;
+        }
+
+
+        const double duration =
+            (
+                static_cast<int>(
+                    trajectory.control_points.size()) -
+                3
+            ) *
+            trajectory.dt;
+
+
+        if (duration <= 0.0)
+        {
+            return false;
+        }
+
+
+        const double sample_dt =
+            std::max(
+                0.01,
+                trajectory_sample_dt_);
+
+
+        std::vector<
+            geometry_msgs::msg::Point>
+            samples;
+
+
+        for (double t = 0.0;
+             t < duration;
+             t += sample_dt)
+        {
+            samples.push_back(
+                evaluateBSpline(
+                    trajectory,
+                    t));
+        }
+
+
+        samples.push_back(
+            evaluateBSpline(
+                trajectory,
+                duration));
+
+
+        if (samples.size() < 2)
+        {
+            return false;
+        }
+
+
+        // -----------------------------------------------------
+        // 找到离飞机当前位置最近的轨迹点。
+        // -----------------------------------------------------
+        std::size_t closest_index =
+            0;
+
+        double closest_distance =
+            std::numeric_limits<double>::
+                infinity();
+
+
+        for (std::size_t i = 0;
+             i < samples.size();
+             ++i)
+        {
+            const double d =
+                distance(
+                    current,
+                    samples[i]);
+
+            if (d <
+                closest_distance)
+            {
+                closest_distance =
+                    d;
+
+                closest_index =
+                    i;
+            }
+        }
+
+
+        // -----------------------------------------------------
+        // 从closest_index向前检查
+        // -----------------------------------------------------
+        double checked_distance =
+            0.0;
+
+
+        // 先检查closest点本身
+        if (pointCollision(
+                map,
+                samples[closest_index]))
+        {
+            collision_point =
+                samples[closest_index];
+
+            return true;
+        }
+
+
+        for (std::size_t i =
+                 closest_index;
+             i + 1 <
+                 samples.size();
+             ++i)
+        {
+            if (segmentCollision(
+                    map,
+                    samples[i],
+                    samples[i + 1],
+                    collision_point))
+            {
+                return true;
+            }
+
+
+            checked_distance +=
+                distance(
+                    samples[i],
+                    samples[i + 1]);
+
+
+            if (checked_distance >=
+                lookahead_distance_)
+            {
+                break;
+            }
+        }
+
+
+        return false;
+    }
+
+
+    // =========================================================
+    // Action执行
+    // =========================================================
+    void execute(
+        const std::shared_ptr<
+            GoalHandleNavigate> goal_handle)
+    {
+        const double action_start_time =
+            now().seconds();
+
+
+        const auto goal_msg =
+            goal_handle->get_goal();
+
+
+        geometry_msgs::msg::Point target;
+
+        target.x =
+            goal_msg->
+                goal_pose.pose.position.x;
+
+        target.y =
+            goal_msg->
+                goal_pose.pose.position.y;
+
+        target.z =
+            goal_msg->
+                goal_pose.pose.position.z;
+
+
+        const auto actual_start =
+            getCurrentPosition();
+
+
+        const double initial_distance =
+            distance(
+                actual_start,
+                target);
 
 
         // =====================================================
-        // 6. EXECUTING
-        //
-        // manager直接监视PX4实际位置。
-        //
-        // 当前controller已经能：
-        // - 自动Offboard
-        // - 自动Arm
-        // - 先到B样条起点
-        // - 执行轨迹
-        // - 最后悬停
-        //
-        // 所以这里不重复写控制逻辑。
+        // 已经在目标附近
+        // =====================================================
+        if (initial_distance <=
+            goal_tolerance_)
+        {
+            auto result =
+                std::make_shared<
+                    NavigateToGoal::Result>();
+
+            result->success =
+                true;
+
+            result->message =
+                "已经位于目标附近";
+
+            result->total_time =
+                0.0f;
+
+
+            publishFeedback(
+                goal_handle,
+                "SUCCEEDED",
+                target,
+                initial_distance);
+
+
+            goal_handle->succeed(
+                result);
+
+
+            goal_active_ =
+                false;
+
+            return;
+        }
+
+
+        // =====================================================
+        // 初始规划起点
+        // =====================================================
+        geometry_msgs::msg::Point planning_start =
+            actual_start;
+
+
+        if (planning_start.z <
+            ground_z_threshold_)
+        {
+            planning_start.z =
+                takeoff_height_;
+
+            RCLCPP_INFO(
+                get_logger(),
+                "地面起飞：A*起点高度 %.2f -> %.2f m",
+                actual_start.z,
+                planning_start.z);
+        }
+
+
+        // =====================================================
+        // 第一次规划
+        // =====================================================
+        std::string error_message;
+
+
+        if (!planAndWaitTrajectory(
+                planning_start,
+                target,
+                goal_handle,
+                initial_distance,
+                false,
+                error_message))
+        {
+            abortGoal(
+                goal_handle,
+                error_message,
+                action_start_time);
+
+            return;
+        }
+
+
+        RCLCPP_INFO(
+            get_logger(),
+            "初始轨迹已下发，进入EXECUTING");
+
+
+        // =====================================================
+        // 飞行监控 + 在线重规划
         // =====================================================
         const auto execution_begin =
             std::chrono::steady_clock::now();
+
 
         const double feedback_period =
             1.0 /
@@ -809,20 +1503,48 @@ private:
                 1.0,
                 feedback_rate_);
 
-        bool inside_goal = false;
+
+        const double safety_period =
+            1.0 /
+            std::max(
+                1.0,
+                safety_check_rate_);
+
+
+        auto last_safety_check =
+            std::chrono::steady_clock::now();
+
+
+        // 允许第一次立即重规划
+        auto last_replan_time =
+            std::chrono::steady_clock::now() -
+            std::chrono::duration<double>(
+                replan_cooldown_);
+
+
+        int replan_count =
+            0;
+
+
+        bool inside_goal =
+            false;
+
 
         std::chrono::steady_clock::time_point
             inside_goal_since;
+
 
         while (rclcpp::ok())
         {
             const auto current =
                 getCurrentPosition();
 
+
             const double dist =
                 distance(
                     current,
                     target);
+
 
             publishFeedback(
                 goal_handle,
@@ -831,25 +1553,30 @@ private:
                 initial_distance);
 
 
-            // ---------------------------------------------
-            // 到达目标判定
-            // ---------------------------------------------
+            // =================================================
+            // 1. 到达目标
+            // =================================================
             if (dist <=
                 goal_tolerance_)
             {
                 if (!inside_goal)
                 {
-                    inside_goal = true;
+                    inside_goal =
+                        true;
 
                     inside_goal_since =
-                        std::chrono::steady_clock::now();
+                        std::chrono::
+                            steady_clock::now();
                 }
+
 
                 const double hold_time =
                     std::chrono::duration<double>(
-                        std::chrono::steady_clock::now() -
+                        std::chrono::
+                            steady_clock::now() -
                         inside_goal_since)
                         .count();
+
 
                 if (hold_time >=
                     goal_hold_time_)
@@ -858,10 +1585,13 @@ private:
                         std::make_shared<
                             NavigateToGoal::Result>();
 
-                    result->success = true;
+                    result->success =
+                        true;
 
                     result->message =
-                        "目标到达";
+                        "目标到达，重规划次数=" +
+                        std::to_string(
+                            replan_count);
 
                     result->total_time =
                         static_cast<float>(
@@ -870,48 +1600,177 @@ private:
                                 now().seconds() -
                                 action_start_time));
 
+
                     publishFeedback(
                         goal_handle,
                         "SUCCEEDED",
                         target,
                         initial_distance);
 
+
                     goal_handle->succeed(
                         result);
 
-                    goal_active_ = false;
+
+                    goal_active_ =
+                        false;
+
 
                     RCLCPP_INFO(
                         get_logger(),
-                        "导航成功，目标=(%.2f %.2f %.2f)",
-                        target.x,
-                        target.y,
-                        target.z);
+                        "导航成功，replan=%d",
+                        replan_count);
 
                     return;
                 }
             }
             else
             {
-                inside_goal = false;
+                inside_goal =
+                    false;
             }
 
 
-            // ---------------------------------------------
-            // 执行超时
-            // ---------------------------------------------
+            // =================================================
+            // 2. 在线轨迹碰撞检测
+            // =================================================
+            const auto now_steady =
+                std::chrono::steady_clock::now();
+
+
+            const double since_safety_check =
+                std::chrono::duration<double>(
+                    now_steady -
+                    last_safety_check)
+                    .count();
+
+
+            const double since_replan =
+                std::chrono::duration<double>(
+                    now_steady -
+                    last_replan_time)
+                    .count();
+
+
+            if (enable_replan_ &&
+                since_safety_check >=
+                    safety_period &&
+                since_replan >=
+                    replan_cooldown_)
+            {
+                last_safety_check =
+                    now_steady;
+
+
+                geometry_msgs::msg::Point
+                    collision_point;
+
+
+                if (trajectoryCollisionAhead(
+                        current,
+                        collision_point))
+                {
+                    RCLCPP_WARN(
+                        get_logger(),
+                        "检测到未来轨迹碰撞："
+                        "(%.2f, %.2f, %.2f)，准备重规划",
+                        collision_point.x,
+                        collision_point.y,
+                        collision_point.z);
+
+
+                    if (replan_count >=
+                        max_replans_)
+                    {
+                        abortGoal(
+                            goal_handle,
+                            "超过最大重规划次数",
+                            action_start_time);
+
+                        return;
+                    }
+
+
+                    publishFeedback(
+                        goal_handle,
+                        "REPLANNING",
+                        target,
+                        initial_distance);
+
+
+                    // -----------------------------------------
+                    // 重规划起点直接使用当前无人机实际位置。
+                    //
+                    // 当前controller收到新B样条后，
+                    // 如果仍处于armed+offboard，
+                    // 会自动切换到MOVE_TO_START，
+                    // 再执行新轨迹。
+                    // -----------------------------------------
+                    const auto replan_start =
+                        getCurrentPosition();
+
+
+                    std::string replan_error;
+
+
+                    if (!planAndWaitTrajectory(
+                            replan_start,
+                            target,
+                            goal_handle,
+                            initial_distance,
+                            true,
+                            replan_error))
+                    {
+                        abortGoal(
+                            goal_handle,
+                            replan_error,
+                            action_start_time);
+
+                        return;
+                    }
+
+
+                    ++replan_count;
+
+
+                    last_replan_time =
+                        std::chrono::
+                            steady_clock::now();
+
+
+                    inside_goal =
+                        false;
+
+
+                    RCLCPP_INFO(
+                        get_logger(),
+                        "第%d次重规划成功，继续执行新轨迹",
+                        replan_count);
+
+
+                    // 当前循环不要继续使用旧检查状态
+                    continue;
+                }
+            }
+
+
+            // =================================================
+            // 3. 总执行超时
+            // =================================================
             const double execution_elapsed =
                 std::chrono::duration<double>(
-                    std::chrono::steady_clock::now() -
+                    std::chrono::
+                        steady_clock::now() -
                     execution_begin)
                     .count();
+
 
             if (execution_elapsed >
                 execution_timeout_)
             {
                 abortGoal(
                     goal_handle,
-                    "轨迹执行超时",
+                    "导航执行超时",
                     action_start_time);
 
                 return;
@@ -938,6 +1797,7 @@ private:
     std::string action_name_;
     std::string astar_service_name_;
     std::string odom_topic_;
+    std::string map_topic_;
     std::string bspline_topic_;
 
     double goal_tolerance_{0.30};
@@ -945,6 +1805,17 @@ private:
 
     double ground_z_threshold_{0.50};
     double takeoff_height_{2.50};
+
+    bool enable_replan_{true};
+    double safety_check_rate_{10.0};
+    double lookahead_distance_{4.0};
+    double trajectory_sample_dt_{0.05};
+
+    bool unknown_is_collision_{false};
+    bool outside_map_is_collision_{true};
+
+    double replan_cooldown_{1.0};
+    int max_replans_{10};
 
     double service_wait_timeout_{3.0};
     double planning_timeout_{10.0};
@@ -954,7 +1825,7 @@ private:
 
 
     // =========================================================
-    // Current vehicle state
+    // Vehicle state
     // =========================================================
     std::mutex state_mutex_;
 
@@ -965,20 +1836,35 @@ private:
 
 
     // =========================================================
-    // Trajectory generation monitor
+    // Map
+    // =========================================================
+    std::mutex map_mutex_;
+
+    bool map_received_{false};
+
+    uav_mapping::msg::VoxelMap
+        latest_map_;
+
+
+    // =========================================================
+    // Trajectory
     // =========================================================
     std::mutex trajectory_mutex_;
 
     std::condition_variable
         trajectory_cv_;
 
+    bool latest_trajectory_valid_{false};
+
     uint64_t trajectory_generation_{0};
 
-    double latest_trajectory_duration_{0.0};
+    trajectory_optimizer::msg::
+        BSplineTrajectory
+        latest_trajectory_;
 
 
     // =========================================================
-    // One active navigation goal
+    // Action
     // =========================================================
     std::atomic_bool
         goal_active_{false};
@@ -996,6 +1882,10 @@ private:
         SharedPtr odom_sub_;
 
     rclcpp::Subscription<
+        uav_mapping::msg::VoxelMap>::
+        SharedPtr map_sub_;
+
+    rclcpp::Subscription<
         trajectory_optimizer::msg::
             BSplineTrajectory>::
         SharedPtr bspline_sub_;
@@ -1010,7 +1900,9 @@ int main(
     int argc,
     char **argv)
 {
-    rclcpp::init(argc, argv);
+    rclcpp::init(
+        argc,
+        argv);
 
     rclcpp::spin(
         std::make_shared<
