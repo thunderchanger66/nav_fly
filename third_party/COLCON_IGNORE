@@ -1,0 +1,3 @@
+# Third-party dependencies are built and installed independently.
+# Keep colcon from discovering their nested package metadata when building
+# the ROS workspace from the repository root.

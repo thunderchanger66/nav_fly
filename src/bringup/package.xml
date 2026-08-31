@@ -16,6 +16,10 @@
   <exec_depend>rviz2</exec_depend>
   <exec_depend>uav_mapping</exec_depend>
   <exec_depend>astar_planner</exec_depend>
+  <exec_depend>planner_manager_interfaces</exec_depend>
+  <exec_depend>trajectory_optimizer</exec_depend>
+  <exec_depend>px4_controller</exec_depend>
+  <exec_depend>planner_manager</exec_depend>
 
 
   <test_depend>ament_lint_auto</test_depend>

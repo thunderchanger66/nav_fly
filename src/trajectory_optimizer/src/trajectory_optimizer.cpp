@@ -171,8 +171,11 @@ bool TrajectoryOptimizer::lineSafe(
             allow_unknown);
     }
 
+    // Sample considerably finer than a voxel.  A* paths can move
+    // diagonally between voxel centres; a half-voxel step may skip the
+    // occupied cell at the corner of such a segment.
     const double step =
-        resolution_ * 0.5;
+        std::max(0.02, resolution_ * 0.1);
 
     const int n =
         std::max(
@@ -618,22 +621,49 @@ bool TrajectoryOptimizer::buildSpanCorridor(
     const Eigen::Vector3d &b =
         reference[span_index + 2];
 
-    // 参考路径段本身应该是安全的。
-    // 如果这里失败，说明简化/重采样或地图状态有问题。
-    if (!lineSafe(
+    // The geometric midpoint can lie exactly on a voxel boundary after
+    // interpolation, even though both reference points are safe.  Try a
+    // few points along the segment, including both endpoints.  Endpoints
+    // are voxel centres supplied by A* and are the most reliable seeds.
+    constexpr double seed_alphas[] = {
+        0.0, 1.0, 0.5, 0.35, 0.65, 0.2, 0.8, 0.05, 0.95};
+
+    const bool line_safe =
+        lineSafe(
             a,
             b,
-            options_.unknown_is_free))
+            options_.unknown_is_free);
+
+    for (const double alpha : seed_alphas)
     {
-        return false;
+        const Eigen::Vector3d seed =
+            (1.0 - alpha) * a + alpha * b;
+
+        if (buildPointCorridor(seed, corridor))
+        {
+            if (!line_safe)
+            {
+                std::cout
+                    << "[TrajectoryOptimizer] span "
+                    << span_index
+                    << " crosses a voxel boundary; using endpoint corridor"
+                    << std::endl;
+            }
+            return true;
+        }
     }
 
-    const Eigen::Vector3d seed =
-        0.5 * (a + b);
+    int ax, ay, az, bx, by, bz;
+    const bool a_in = worldToGrid(a, ax, ay, az);
+    const bool b_in = worldToGrid(b, bx, by, bz);
+    std::cout << "[TrajectoryOptimizer] corridor seed failure span "
+              << span_index << ", a=[" << a.transpose() << "] state="
+              << (a_in ? static_cast<int>(map_data_[toIndex(ax, ay, az)]) : -999)
+              << ", b=[" << b.transpose() << "] state="
+              << (b_in ? static_cast<int>(map_data_[toIndex(bx, by, bz)]) : -999)
+              << std::endl;
 
-    return buildPointCorridor(
-        seed,
-        corridor);
+    return false;
 }
 
 
@@ -644,7 +674,8 @@ bool TrajectoryOptimizer::solveQP(
     const std::vector<Eigen::Vector3d> &reference,
     const std::vector<CorridorBox> &corridors,
     double dt,
-    std::vector<Eigen::Vector3d> &control_points)
+    std::vector<Eigen::Vector3d> &control_points,
+    bool enforce_corridors)
 {
     const int N =
         static_cast<int>(
@@ -895,87 +926,44 @@ bool TrajectoryOptimizer::solveQP(
     // 这些都是 Q 的线性组合，因此仍然是线性约束，
     // 整个优化问题仍是凸 QP。
     // ========================================================
-    const int span_num =
-        N - 3;
+    const int span_num = N - 3;
 
-    for (int span = 0;
-         span < span_num;
-         ++span)
+    if (enforce_corridors)
     {
-        const auto &box =
-            corridors[span];
-
-        for (int d = 0;
-             d < 3;
-             ++d)
+        for (int span = 0;
+             span < span_num;
+             ++span)
         {
-            // B0
-            addRow(
-                {
-                    {
-                        varIndex(span, d),
-                        1.0 / 6.0
-                    },
-                    {
-                        varIndex(span + 1, d),
-                        4.0 / 6.0
-                    },
-                    {
-                        varIndex(span + 2, d),
-                        1.0 / 6.0
-                    }
-                },
-                box.min[d],
-                box.max[d]);
+            const auto &box = corridors[span];
 
-            // B1
-            addRow(
-                {
-                    {
-                        varIndex(span + 1, d),
-                        2.0 / 3.0
-                    },
-                    {
-                        varIndex(span + 2, d),
-                        1.0 / 3.0
-                    }
-                },
-                box.min[d],
-                box.max[d]);
+            for (int d = 0; d < 3; ++d)
+            {
+                // B0
+                addRow(
+                    {{varIndex(span, d), 1.0 / 6.0},
+                     {varIndex(span + 1, d), 4.0 / 6.0},
+                     {varIndex(span + 2, d), 1.0 / 6.0}},
+                    box.min[d], box.max[d]);
 
-            // B2
-            addRow(
-                {
-                    {
-                        varIndex(span + 1, d),
-                        1.0 / 3.0
-                    },
-                    {
-                        varIndex(span + 2, d),
-                        2.0 / 3.0
-                    }
-                },
-                box.min[d],
-                box.max[d]);
+                // B1
+                addRow(
+                    {{varIndex(span + 1, d), 2.0 / 3.0},
+                     {varIndex(span + 2, d), 1.0 / 3.0}},
+                    box.min[d], box.max[d]);
 
-            // B3
-            addRow(
-                {
-                    {
-                        varIndex(span + 1, d),
-                        1.0 / 6.0
-                    },
-                    {
-                        varIndex(span + 2, d),
-                        4.0 / 6.0
-                    },
-                    {
-                        varIndex(span + 3, d),
-                        1.0 / 6.0
-                    }
-                },
-                box.min[d],
-                box.max[d]);
+                // B2
+                addRow(
+                    {{varIndex(span + 1, d), 1.0 / 3.0},
+                     {varIndex(span + 2, d), 2.0 / 3.0}},
+                    box.min[d], box.max[d]);
+
+                // B3
+                addRow(
+                    {{varIndex(span + 1, d), 1.0 / 6.0},
+                     {varIndex(span + 2, d), 4.0 / 6.0},
+                     {varIndex(span + 3, d), 1.0 / 6.0}},
+                    box.min[d], box.max[d]);
+            }
         }
     }
 
@@ -1583,6 +1571,44 @@ bool TrajectoryOptimizer::optimize(
                 result.corridors,
                 dt,
                 control_points);
+
+        // Local corridor boxes can be individually valid but have no common
+        // overlap at a sharp replanning corner.  In that case the strict
+        // Bezier-box formulation is infeasible even though a safe smooth
+        // trajectory may exist.  Retry without those hard span constraints;
+        // the dynamic constraints remain active and validateTrajectory() is
+        // still required before publishing anything.
+        if (!solved)
+        {
+            std::cout
+                << "[TrajectoryOptimizer] 严格走廊QP不可行，尝试松弛几何约束"
+                << std::endl;
+
+            const bool relaxed_solved =
+                solveQP(
+                    result.reference_points,
+                    result.corridors,
+                    dt,
+                    control_points,
+                    false);
+
+            if (relaxed_solved &&
+                validateTrajectory(
+                    control_points,
+                    dt))
+            {
+                result.control_points = control_points;
+                result.dt = dt;
+                result.duration =
+                    (static_cast<int>(control_points.size()) - 3) * dt;
+                message =
+                    "B样条QP优化成功（松弛走廊约束），控制点数=" +
+                    std::to_string(control_points.size()) +
+                    "，dt=" + std::to_string(dt) +
+                    "，duration=" + std::to_string(result.duration);
+                return true;
+            }
+        }
 
         if (!solved)
         {

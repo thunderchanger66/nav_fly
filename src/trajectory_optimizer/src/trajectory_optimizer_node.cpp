@@ -265,8 +265,9 @@ private:
         {
             RCLCPP_WARN(
                 get_logger(),
-                "%s",
-                message.c_str());
+                "路径优化失败: %s (输入路径点=%zu)",
+                message.c_str(),
+                msg->poses.size());
             return;
         }
 

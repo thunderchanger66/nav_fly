@@ -194,7 +194,8 @@ private:
         const std::vector<Eigen::Vector3d> &reference,
         const std::vector<CorridorBox> &corridors,
         double dt,
-        std::vector<Eigen::Vector3d> &control_points);
+        std::vector<Eigen::Vector3d> &control_points,
+        bool enforce_corridors = true);
 
     bool validateTrajectory(
         const std::vector<Eigen::Vector3d> &control_points,

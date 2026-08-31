@@ -663,9 +663,13 @@ private:
                 cloud_queue_.front();
 
 
+            // Use the same corrected timestamp as processCloud().  Without
+            // this, a non-zero LiDAR offset can make a valid cloud leave the
+            // queue before the corresponding odometry sample is available.
             const double t =
                 cloudTime(
-                    *cloud);
+                    *cloud) +
+                lidar_time_offset_;
 
 
             // 点云太旧，连缓存最早位姿都比它新
